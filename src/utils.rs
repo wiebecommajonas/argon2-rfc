@@ -1,16 +1,3 @@
-#[macro_export]
-macro_rules! vec_from_slices {
-    ( $($s:expr),+) => {
-        {
-            let mut vec = Vec::new();
-            $(
-                vec.extend_from_slice($s);
-            )+
-            vec
-        }
-    };
-}
-
 pub(crate) fn le32<U>(input: U) -> [u8; 4]
 where
     U: Into<u32>,
@@ -25,17 +12,18 @@ where
     Into::<u64>::into(input).to_le_bytes()
 }
 
-pub(crate) fn lo(x: u64) -> u64 {
-    x & 0xffffffff
+#[macro_export]
+macro_rules! lo {
+    ($num:expr) => {{
+        0xffffffff & $num
+    }};
 }
 
-pub(crate) fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
-    assert_eq!(a.len(), b.len());
-
-    a.iter()
-        .zip(b.iter())
-        .map(|(a_, b_)| a_ ^ b_)
-        .collect::<Vec<u8>>()
+#[macro_export]
+macro_rules! hi {
+    ($num:expr) => {{
+        $num >> 32
+    }};
 }
 
 #[macro_export]
