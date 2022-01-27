@@ -48,15 +48,15 @@ impl Argon2 {
         version: Version,
         argon2_type: Variant,
     ) -> Self {
-        debug_assert!(
+        assert!(
             (1..=16777215).contains(&degree_of_parallelism),
             "Degree of parralellism invalid"
         );
-        debug_assert!(
+        assert!(
             memory_size >= 8 * degree_of_parallelism,
             "Memory size invalid"
         );
-        debug_assert!(number_of_passes >= 1, "Number of passes invalid");
+        assert!(number_of_passes >= 1, "Number of passes invalid");
 
         let m_prime = 4 * degree_of_parallelism * (memory_size / (4 * degree_of_parallelism));
         let q = m_prime / degree_of_parallelism;
@@ -138,8 +138,9 @@ impl Argon2 {
         }
     }
 
-    fn h0<const TAGLEN: usize>(
+    fn h0(
         &self,
+        taglen: u32,
         password: &[u8],
         salt: &[u8],
         secret: Option<&[u8]>,
@@ -147,7 +148,7 @@ impl Argon2 {
     ) -> [u8; 64] {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&le32(self.degree_of_parallelism));
-        bytes.extend_from_slice(&le32(TAGLEN as u32));
+        bytes.extend_from_slice(&le32(taglen));
         bytes.extend_from_slice(&le32(self.memory_size));
         bytes.extend_from_slice(&le32(self.number_of_passes));
         bytes.extend_from_slice(&le32(self.version as u32));
@@ -403,7 +404,7 @@ impl Argon2 {
     }
 
     pub fn hash<const TAGLEN: usize>(
-        &mut self,
+        &self,
         password: &[u8],
         salt: &[u8],
         secret: Option<&[u8]>,
@@ -423,7 +424,7 @@ impl Argon2 {
 
         let mut blocks = vec![0u8; self.m_prime as usize * 1024];
 
-        let h0_ = self.h0::<TAGLEN>(password, salt, secret, associated_data);
+        let h0_ = self.h0(TAGLEN as u32, password, salt, secret, associated_data);
 
         for lane in 0..self.degree_of_parallelism {
             self.compute_first_slice(&mut blocks, &h0_, lane);
@@ -455,6 +456,65 @@ impl Argon2 {
         }
 
         let mut output_tag = [0; TAGLEN];
+        Self::h_prime(&mut output_tag, &c);
+
+        output_tag
+    }
+
+    pub fn variable_hash(
+        &self,
+        taglen: u32,
+        password: &[u8],
+        salt: &[u8],
+        secret: Option<&[u8]>,
+        associated_data: Option<&[u8]>,
+    ) -> Vec<u8> {
+        assert!(password.len() < u32::MAX as usize, "Password is too long");
+        assert!(salt.len() < u32::MAX as usize, "Salt is too long");
+        if let Some(secret) = secret {
+            assert!(secret.len() <= u32::MAX as usize, "Secret is too long");
+        }
+        if let Some(associated) = associated_data {
+            assert!(
+                associated.len() <= u32::MAX as usize,
+                "Associated data is too long"
+            );
+        }
+
+        let mut blocks = vec![0u8; self.m_prime as usize * 1024];
+
+        let h0_ = self.h0(taglen, password, salt, secret, associated_data);
+
+        for lane in 0..self.degree_of_parallelism {
+            self.compute_first_slice(&mut blocks, &h0_, lane);
+        }
+
+        for slice in 1..Self::SL {
+            for lane in 0..self.degree_of_parallelism {
+                self.compute_slice(&mut blocks, 0, lane, slice, 0);
+            }
+        }
+
+        for pass in 1..self.number_of_passes {
+            for slice in 0..Self::SL {
+                for lane in 0..self.degree_of_parallelism {
+                    self.compute_slice(&mut blocks, pass, lane, slice, 0);
+                }
+            }
+        }
+
+        let mut c = [0; 1024];
+        let col = self.lanelen - 1;
+        c[..].copy_from_slice(&blocks[Self::block_index(col)]);
+
+        for lane in 1..self.degree_of_parallelism {
+            let index = Self::block_index(lane * self.lanelen + col);
+            for (c_, b_) in c.iter_mut().zip(blocks[index].iter()) {
+                *c_ ^= b_;
+            }
+        }
+
+        let mut output_tag = vec![0; taglen as usize];
         Self::h_prime(&mut output_tag, &c);
 
         output_tag
