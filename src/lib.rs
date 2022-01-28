@@ -147,35 +147,34 @@ impl Argon2 {
         associated_data: Option<&[u8]>,
     ) -> [u8; 64] {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&le32(self.degree_of_parallelism));
-        bytes.extend_from_slice(&le32(taglen));
-        bytes.extend_from_slice(&le32(self.memory_size));
-        bytes.extend_from_slice(&le32(self.number_of_passes));
-        bytes.extend_from_slice(&le32(self.version as u32));
-        bytes.extend_from_slice(&le32(self.argon2_type as u32));
-        bytes.extend_from_slice(&le32(password.len() as u32));
+        bytes.extend_from_slice(
+            &[
+                le32(self.degree_of_parallelism),
+                le32(taglen),
+                le32(self.memory_size),
+                le32(self.number_of_passes),
+                le32(self.version as u32),
+                le32(self.argon2_type as u32),
+                le32(password.len() as u32),
+            ]
+            .concat(),
+        );
         bytes.extend_from_slice(password);
-        if salt.is_empty() {
-            bytes.extend_from_slice(&le32(0_u32));
-        } else {
-            bytes.extend_from_slice(&le32(salt.len() as u32));
+        bytes.extend_from_slice(&le32(salt.len() as u32));
+        if !salt.is_empty() {
             bytes.extend_from_slice(salt);
         }
         if let Some(secret) = secret {
-            if secret.is_empty() {
-                bytes.extend_from_slice(&le32(0_u32));
-            } else {
-                bytes.extend_from_slice(&le32(secret.len() as u32));
+            bytes.extend_from_slice(&le32(secret.len() as u32));
+            if !secret.is_empty() {
                 bytes.extend_from_slice(secret);
             }
         } else {
             bytes.extend_from_slice(&le32(0_u32));
         }
         if let Some(associated) = associated_data {
-            if associated.is_empty() {
-                bytes.extend_from_slice(&le32(0_u32));
-            } else {
-                bytes.extend_from_slice(&le32(associated.len() as u32));
+            bytes.extend_from_slice(&le32(associated.len() as u32));
+            if !associated.is_empty() {
                 bytes.extend_from_slice(associated);
             }
         } else {
@@ -313,12 +312,14 @@ impl Argon2 {
 
     fn index_j_d(&self, blocks: &mut [u8], block: u32) -> (u32, u32) {
         let prev_block = self.previous(block);
-        let prev_block_index_one = Self::partial_block_index(prev_block, 0, 4);
-        let prev_block_index_two = Self::partial_block_index(prev_block, 4, 8);
+        let bytes = u64::from_le_bytes(
+            blocks[Self::partial_block_index(prev_block, 0, 8)]
+                .try_into()
+                .unwrap(),
+        );
 
-        let j_1 = u32::from_le_bytes(blocks[prev_block_index_one].as_ref().try_into().unwrap());
-        let j_2 = u32::from_le_bytes(blocks[prev_block_index_two].as_ref().try_into().unwrap());
-
+        let j_1 = lo!(bytes) as u32;
+        let j_2 = hi!(bytes) as u32;
         (j_1, j_2)
     }
 
@@ -605,7 +606,7 @@ mod tests {
 
     #[test]
     fn argon2d_rfc_test() {
-        let mut argon2 = Argon2::new(4, 3, 32, Version::V0x13, Variant::Argon2d);
+        let argon2 = Argon2::new(4, 3, 32, Version::V0x13, Variant::Argon2d);
 
         let hash = argon2.hash::<OUTLEN>(
             &[1; PASSWORDLEN],
@@ -627,7 +628,7 @@ mod tests {
 
     #[test]
     fn argon2i_rfc_test() {
-        let mut argon2 = Argon2::new(4, 3, 32, Version::V0x13, Variant::Argon2i);
+        let argon2 = Argon2::new(4, 3, 32, Version::V0x13, Variant::Argon2i);
 
         let hash = argon2.hash::<OUTLEN>(
             &[1; PASSWORDLEN],
@@ -649,7 +650,7 @@ mod tests {
 
     #[test]
     fn argon2id_rfc_test() {
-        let mut argon2 = Argon2::new(4, 3, 32, Version::V0x13, Variant::Argon2id);
+        let argon2 = Argon2::new(4, 3, 32, Version::V0x13, Variant::Argon2id);
 
         let hash = argon2.hash::<OUTLEN>(
             &[1; PASSWORDLEN],
