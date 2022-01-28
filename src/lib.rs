@@ -3,6 +3,7 @@ mod utils;
 
 use std::{
     convert::TryInto,
+    fmt::Display,
     num::Wrapping,
     ops::Range,
     slice::{from_raw_parts, from_raw_parts_mut},
@@ -16,10 +17,28 @@ pub enum Variant {
     Argon2id = 2,
 }
 
+impl Display for Variant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::Argon2d => write!(f, "argon2d")?,
+            Self::Argon2i => write!(f, "argon2i")?,
+            Self::Argon2id => write!(f, "argon2id")?,
+        }
+        Ok(())
+    }
+}
+
 #[derive(Copy, Clone, PartialEq)]
 pub enum Version {
     V0x10 = 0x10,
     V0x13 = 0x13,
+}
+
+impl Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", *self as u32)?;
+        Ok(())
+    }
 }
 
 pub struct Argon2 {
@@ -462,6 +481,26 @@ impl Argon2 {
         output_tag
     }
 
+    pub fn hash_as_encoded_string<const TAGLEN: usize>(
+        &self,
+        password: &[u8],
+        salt: &[u8],
+        secret: Option<&[u8]>,
+        associated_data: Option<&[u8]>,
+    ) -> String {
+        let hash = self.hash::<TAGLEN>(password, salt, secret, associated_data);
+        format!(
+            "${}$v={}$m={},t={},p={}${}${}",
+            self.argon2_type,
+            self.version,
+            self.memory_size,
+            self.number_of_passes,
+            self.degree_of_parallelism,
+            base64::encode_config(&salt, base64::STANDARD_NO_PAD),
+            base64::encode_config(&hash, base64::STANDARD_NO_PAD)
+        )
+    }
+
     pub fn variable_hash(
         &self,
         taglen: u32,
@@ -519,6 +558,27 @@ impl Argon2 {
         Self::h_prime(&mut output_tag, &c);
 
         output_tag
+    }
+
+    pub fn variable_hash_as_encoded_string(
+        &self,
+        taglen: u32,
+        password: &[u8],
+        salt: &[u8],
+        secret: Option<&[u8]>,
+        associated_data: Option<&[u8]>,
+    ) -> String {
+        let hash = self.variable_hash(taglen, password, salt, secret, associated_data);
+        format!(
+            "${}$v={}$m={},t={},p={}${}${}",
+            self.argon2_type,
+            self.version,
+            self.memory_size,
+            self.number_of_passes,
+            self.degree_of_parallelism,
+            base64::encode_config(&salt, base64::STANDARD_NO_PAD),
+            base64::encode_config(&hash, base64::STANDARD_NO_PAD)
+        )
     }
 }
 

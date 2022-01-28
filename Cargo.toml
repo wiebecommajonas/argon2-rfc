@@ -7,7 +7,7 @@ edition = "2018"
 
 [dependencies]
 blake2-rfc = "0.2.16"
-int-conv = "0.1.4"
+base64 = "0.13.0"
 
 [dev-dependencies]
 hex-literal = "0.3.3"
