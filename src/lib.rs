@@ -380,7 +380,6 @@ impl Argon2 {
         for sliceidx in offset..self.slicelen {
             let block_in_lane = slice * self.slicelen + sliceidx;
             let block = lane * self.lanelen + block_in_lane;
-            println!("slice: {}, block: {}", slice, block);
 
             let (j_1, j_2) = match (self.argon2_type, pass, slice) {
                 (Variant::Argon2id, 0, 0) | (Variant::Argon2id, 0, 1) => {
