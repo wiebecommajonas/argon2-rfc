@@ -1,6 +1,7 @@
 #![allow(clippy::many_single_char_names)]
 mod utils;
 
+use crossbeam::thread;
 use std::{
     convert::TryInto,
     fmt::Display,
@@ -165,42 +166,24 @@ impl Argon2 {
         secret: Option<&[u8]>,
         associated_data: Option<&[u8]>,
     ) -> [u8; 64] {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(
-            &[
-                le32(self.degree_of_parallelism),
-                le32(taglen),
-                le32(self.memory_size),
-                le32(self.number_of_passes),
-                le32(self.version as u32),
-                le32(self.argon2_type as u32),
-                le32(password.len() as u32),
-            ]
-            .concat(),
-        );
-        bytes.extend_from_slice(password);
-        bytes.extend_from_slice(&le32(salt.len() as u32));
-        if !salt.is_empty() {
-            bytes.extend_from_slice(salt);
-        }
-        if let Some(secret) = secret {
-            bytes.extend_from_slice(&le32(secret.len() as u32));
-            if !secret.is_empty() {
-                bytes.extend_from_slice(secret);
-            }
-        } else {
-            bytes.extend_from_slice(&le32(0_u32));
-        }
-        if let Some(associated) = associated_data {
-            bytes.extend_from_slice(&le32(associated.len() as u32));
-            if !associated.is_empty() {
-                bytes.extend_from_slice(associated);
-            }
-        } else {
-            bytes.extend_from_slice(&le32(0_u32));
-        }
-
-        b2hash!(&bytes)
+        let sec = secret.unwrap_or(&[]);
+        let assoc = associated_data.unwrap_or(&[]);
+        b2hash!(
+            &le32(self.degree_of_parallelism),
+            &le32(taglen),
+            &le32(self.memory_size),
+            &le32(self.number_of_passes),
+            &le32(self.version as u32),
+            &le32(self.argon2_type as u32),
+            &le32(password.len() as u32),
+            password,
+            &le32(salt.len() as u32),
+            salt,
+            &le32(sec.len() as u32),
+            sec,
+            &le32(assoc.len() as u32),
+            assoc
+        )
     }
 
     fn transpose(block: &mut [u8], dims: usize) {
@@ -284,15 +267,11 @@ impl Argon2 {
     fn p(input: &mut [u8]) {
         debug_assert_eq!(input.len(), 128, "input needs to be 8 16 byte chunks");
 
-        let v = (0..8)
-            .flat_map(|i| [2 * i, 2 * i + 1])
-            .collect::<Vec<usize>>();
-
         let ptr = input.as_mut_ptr();
         unsafe {
             let mut vs = [std::ptr::null_mut(); 16];
-            for i in 0..16 {
-                vs[i] = ptr.add(v[i] * 8);
+            for (i, iptr) in vs.iter_mut().enumerate() {
+                *iptr = ptr.add(i * 8);
             }
 
             Self::gb(vs[0], vs[4], vs[8], vs[12]);
@@ -401,6 +380,7 @@ impl Argon2 {
         for sliceidx in offset..self.slicelen {
             let block_in_lane = slice * self.slicelen + sliceidx;
             let block = lane * self.lanelen + block_in_lane;
+            println!("slice: {}, block: {}", slice, block);
 
             let (j_1, j_2) = match (self.argon2_type, pass, slice) {
                 (Variant::Argon2id, 0, 0) | (Variant::Argon2id, 0, 1) => {
@@ -446,20 +426,60 @@ impl Argon2 {
 
         let h0_ = self.h0(TAGLEN as u32, password, salt, secret, associated_data);
 
-        for lane in 0..self.degree_of_parallelism {
-            self.compute_first_slice(&mut blocks, &h0_, lane);
+        match self.degree_of_parallelism {
+            1 => thread::scope(|scope| {
+                for lane in 0..self.degree_of_parallelism {
+                    let bs = unsafe { (blocks.as_mut_slice() as *mut [u8]).as_mut().unwrap() };
+                    scope.spawn(move |_scope| {
+                        self.compute_first_slice(bs, &h0_, lane);
+                    });
+                }
+            })
+            .unwrap(),
+            _ => {
+                for lane in 0..self.degree_of_parallelism {
+                    self.compute_first_slice(&mut blocks, &h0_, lane);
+                }
+            }
         }
 
         for slice in 1..Self::SL {
-            for lane in 0..self.degree_of_parallelism {
-                self.compute_slice(&mut blocks, 0, lane, slice, 0);
+            match self.degree_of_parallelism {
+                1 => thread::scope(|scope| {
+                    for lane in 0..self.degree_of_parallelism {
+                        let bs = unsafe { (blocks.as_mut_slice() as *mut [u8]).as_mut().unwrap() };
+                        scope.spawn(move |_scope| {
+                            self.compute_slice(bs, 0, lane, slice, 0);
+                        });
+                    }
+                })
+                .unwrap(),
+                _ => {
+                    for lane in 0..self.degree_of_parallelism {
+                        self.compute_slice(&mut blocks, 0, lane, slice, 0);
+                    }
+                }
             }
         }
 
         for pass in 1..self.number_of_passes {
             for slice in 0..Self::SL {
-                for lane in 0..self.degree_of_parallelism {
-                    self.compute_slice(&mut blocks, pass, lane, slice, 0);
+                match self.degree_of_parallelism {
+                    1 => thread::scope(|scope| {
+                        for lane in 0..self.degree_of_parallelism {
+                            let bs =
+                                unsafe { (blocks.as_mut_slice() as *mut [u8]).as_mut().unwrap() };
+                            scope.spawn(move |_scope| {
+                                self.compute_slice(bs, pass, lane, slice, 0);
+                            });
+                        }
+                    })
+                    .unwrap(),
+                    _ => {
+                        for lane in 0..self.degree_of_parallelism {
+                            self.compute_slice(&mut blocks, pass, lane, slice, 0);
+                        }
+                    }
                 }
             }
         }
@@ -525,20 +545,60 @@ impl Argon2 {
 
         let h0_ = self.h0(taglen, password, salt, secret, associated_data);
 
-        for lane in 0..self.degree_of_parallelism {
-            self.compute_first_slice(&mut blocks, &h0_, lane);
+        match self.degree_of_parallelism {
+            1 => thread::scope(|scope| {
+                for lane in 0..self.degree_of_parallelism {
+                    let bs = unsafe { (blocks.as_mut_slice() as *mut [u8]).as_mut().unwrap() };
+                    scope.spawn(move |_scope| {
+                        self.compute_first_slice(bs, &h0_, lane);
+                    });
+                }
+            })
+            .unwrap(),
+            _ => {
+                for lane in 0..self.degree_of_parallelism {
+                    self.compute_first_slice(&mut blocks, &h0_, lane);
+                }
+            }
         }
 
         for slice in 1..Self::SL {
-            for lane in 0..self.degree_of_parallelism {
-                self.compute_slice(&mut blocks, 0, lane, slice, 0);
+            match self.degree_of_parallelism {
+                1 => thread::scope(|scope| {
+                    for lane in 0..self.degree_of_parallelism {
+                        let bs = unsafe { (blocks.as_mut_slice() as *mut [u8]).as_mut().unwrap() };
+                        scope.spawn(move |_scope| {
+                            self.compute_slice(bs, 0, lane, slice, 0);
+                        });
+                    }
+                })
+                .unwrap(),
+                _ => {
+                    for lane in 0..self.degree_of_parallelism {
+                        self.compute_slice(&mut blocks, 0, lane, slice, 0);
+                    }
+                }
             }
         }
 
         for pass in 1..self.number_of_passes {
             for slice in 0..Self::SL {
-                for lane in 0..self.degree_of_parallelism {
-                    self.compute_slice(&mut blocks, pass, lane, slice, 0);
+                match self.degree_of_parallelism {
+                    1 => thread::scope(|scope| {
+                        for lane in 0..self.degree_of_parallelism {
+                            let bs =
+                                unsafe { (blocks.as_mut_slice() as *mut [u8]).as_mut().unwrap() };
+                            scope.spawn(move |_scope| {
+                                self.compute_slice(bs, pass, lane, slice, 0);
+                            });
+                        }
+                    })
+                    .unwrap(),
+                    _ => {
+                        for lane in 0..self.degree_of_parallelism {
+                            self.compute_slice(&mut blocks, pass, lane, slice, 0);
+                        }
+                    }
                 }
             }
         }
